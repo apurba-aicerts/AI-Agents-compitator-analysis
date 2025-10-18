@@ -314,3 +314,51 @@ class HashtagAnalysisResponse(BaseModel):
     top_hashtags_by_engagement: List[HashtagStat] = []
     hashtag_stats: List[HashtagStat] = []
     top_posts_for_company: List[PostOut] = []
+
+# Add these new schemas to your existing schemas.py file
+
+# ------------------------
+# Enhanced Alert schemas for detailed context
+# ------------------------
+class PostDetailsInAlert(BaseModel):
+    """
+    Post details to be embedded within an alert response.
+    """
+    post_id: int
+    post_url: Optional[str] = None
+    post_description: Optional[str] = None
+    posted_at: Optional[datetime] = None
+    likes: int = 0
+    comments_count: int = 0
+    shares: int = 0
+    sentiment_label: Optional[str] = None
+    sentiment_score: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
+class AlertWithPost(BaseModel):
+    """
+    Alert with embedded post details for contextual information.
+    """
+    alert_id: int
+    alert_message: str
+    severity: str
+    created_at: datetime
+    post: Optional[PostDetailsInAlert] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CompanyDailyAlerts(BaseModel):
+    """
+    Company with all its alerts created today, grouped together.
+    """
+    company_id: int
+    company_name: str
+    alerts: List[AlertWithPost] = []
+
+    class Config:
+        from_attributes = True

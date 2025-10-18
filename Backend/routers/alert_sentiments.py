@@ -19,6 +19,76 @@ def get_db():
         db.close()
 
 # --- Dashboard APIs ---
+@router.get("/alerts/today", response_model=List[schemas.CompanyDailyAlerts])
+def get_today_alerts_grouped_by_company(
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieves all alerts created today (UTC), grouped by company.
+    Each company entry includes all its alerts with full post context.
+    """
+    # Calculate today's date range in UTC
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = today_start + timedelta(days=1)
+    
+    # Query alerts created today with company and post details
+    alerts_today = (
+        db.query(models.Alert, models.Company, models.SocialMediaPost)
+        .join(models.Company, models.Alert.company_id == models.Company.company_id)
+        .outerjoin(models.SocialMediaPost, models.Alert.post_id == models.SocialMediaPost.id)
+        .filter(models.Alert.created_at >= today_start)
+        .filter(models.Alert.created_at < today_end)
+        .order_by(models.Company.company_name, models.Alert.created_at.desc())
+        .all()
+    )
+    
+    # Group alerts by company
+    company_alerts_map = {}
+    
+    for alert, company, post in alerts_today:
+        company_id = company.company_id
+        
+        # Initialize company entry if not exists
+        if company_id not in company_alerts_map:
+            company_alerts_map[company_id] = {
+                "company_id": company_id,
+                "company_name": company.company_name,
+                "alerts": []
+            }
+        
+        # Build post details if post exists
+        post_details = None
+        if post:
+            post_details = schemas.PostDetailsInAlert(
+                post_id=post.id,
+                post_url=post.post_url,
+                post_description=post.post_description,
+                posted_at=post.posted_at,
+                likes=post.likes,
+                comments_count=post.comments_count,
+                shares=post.shares,
+                sentiment_label=post.sentiment_label,
+                sentiment_score=post.sentiment_score
+            )
+        
+        # Build alert with post
+        alert_with_post = schemas.AlertWithPost(
+            alert_id=alert.alert_id,
+            alert_message=alert.alert_message,
+            severity=alert.severity,
+            created_at=alert.created_at,
+            post=post_details
+        )
+        
+        company_alerts_map[company_id]["alerts"].append(alert_with_post)
+    
+    # Convert map to list and return
+    result = [
+        schemas.CompanyDailyAlerts(**company_data)
+        for company_data in company_alerts_map.values()
+    ]
+    
+    return result
 
 @router.get("/alerts", response_model=List[schemas.AlertOut])
 def get_alerts(

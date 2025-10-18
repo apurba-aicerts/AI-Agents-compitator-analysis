@@ -29,9 +29,9 @@ client = ApifyClient("apify_api_xzoLbzmGGSTuP6gAsBqvCqcIgSXXoK3RtuV4")
 
 # Prepare the Actor input
 run_input = {
-    "company_name": "google",
+    "company_name": "LinkedIn",
     "page_number": 1,
-    "limit": 100,
+    "limit": 1,
     "sort": "recent",
 }
 

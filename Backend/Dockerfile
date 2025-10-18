@@ -1,43 +1,26 @@
 # Use Python 3.11 slim image as base
 FROM python:3.11-slim
 
-# Set working directory inside container
 WORKDIR /app
 
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive
+    PYTHONUNBUFFERED=1
 
-# Install system dependencies
-# RUN apt-get update && apt-get install -y --no-install-recommends \
-#     build-essential \
-#     ffmpeg \ 
-#     && rm -rf /var/lib/apt/lists/*
-
+# Install system dependencies for cryptography
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    ffmpeg \
     libffi-dev \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-
-# Copy requirements first to leverage Docker cache
 COPY requirements.txt .
-
-# Install Python dependencies
+# This installs all packages, including python-jose with its crypto extra
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy entire project into container
 COPY . .
 
+# IMPORTANT: The backend listens on port 8000 inside the container
+EXPOSE 8000
 
-# Expose the port FastAPI/Uvicorn will run on
-EXPOSE 8090
-
-# Optional: Healthcheck for production readiness
-# HEALTHCHECK CMD curl --fail http://localhost:8090/docs || exit 1
-
-# Command to run FastAPI app
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8090"]
+# Run the FastAPI app on port 8000 inside the container
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

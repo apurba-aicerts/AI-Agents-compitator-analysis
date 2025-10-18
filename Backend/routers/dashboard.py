@@ -10,8 +10,8 @@ from core.auth import get_current_user
 import models
 import schemas
 
-router = APIRouter(prefix="/dashboard", tags=["dashboard"], dependencies=[Depends(get_current_user)])
-
+# router = APIRouter(prefix="/dashboard", tags=["dashboard"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 def get_db():
     db = SessionLocal()
     try:

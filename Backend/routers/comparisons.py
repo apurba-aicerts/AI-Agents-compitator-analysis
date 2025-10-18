@@ -1,3 +1,4 @@
+
 # comparisons.py
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -12,7 +13,8 @@ from core.auth import get_current_user
 import models
 import schemas
 
-router = APIRouter(prefix="/comparisons", tags=["comparisons"], dependencies=[Depends(get_current_user)])
+# router = APIRouter(prefix="/comparisons", tags=["comparisons"], dependencies=[Depends(get_current_user)])
+router = APIRouter(prefix="/comparisons", tags=["comparisons"])
 
 
 def get_db():

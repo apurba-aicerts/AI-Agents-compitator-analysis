@@ -1,5 +1,7 @@
 # Ignore virtual environments
 compitator_env/
+test_env/
+streamlit_env/
 .env
 __pycache__/
 *.pyc

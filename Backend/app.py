@@ -293,8 +293,8 @@ def fetch_alerts():
 def run_scroll():
     try:
         with st.spinner("Processing..."):
-            crawl_res = requests.post(f"{API_URL}/api/crawler/crawl/linkedin/all", params={"day": "yesterday"}, timeout=30)
-            scroll_res = requests.post(f"{API_URL}/api/crawler/scroll_companies", params={"day": "yesterday"}, timeout=30)
+            crawl_res = requests.post(f"{API_URL}/api/crawler/crawl/linkedin/all", params={"day": "yesterday"}, timeout=3600)
+            scroll_res = requests.post(f"{API_URL}/api/crawler/scroll_companies", params={"day": "yesterday"}, timeout=3600)
             
             if crawl_res.status_code == 200 and scroll_res.status_code == 200:
                 st.success("✓ Processing completed")

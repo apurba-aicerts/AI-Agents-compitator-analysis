@@ -5,6 +5,9 @@ from sqlalchemy.orm import Session
 import schemas
 import models
 from core.database import SessionLocal
+from sqlalchemy import text
+
+
 
 router = APIRouter(prefix="/companies", tags=["companies"])
 
@@ -73,14 +76,50 @@ def update_company(company_id: int, payload: schemas.CompanyUpdate, db: Session 
     return company
 
 # Delete company
+# @router.delete("/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
+# def delete_company(company_id: int, db: Session = Depends(get_db)):
+#     company = db.query(models.Company).filter(models.Company.company_id == company_id).first()
+#     if not company:
+#         raise HTTPException(status_code=404, detail="Company not found")
+#     db.delete(company)
+#     db.commit()
+#     return None
+
 @router.delete("/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_company(company_id: int, db: Session = Depends(get_db)):
     company = db.query(models.Company).filter(models.Company.company_id == company_id).first()
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
-    db.delete(company)
-    db.commit()
+
+    try:
+        # Delete associations first
+        db.execute(
+            text("""
+                DELETE FROM post_hashtag_association
+                WHERE post_id IN (
+                    SELECT id FROM social_media_post WHERE company_id = :cid
+                )
+            """),
+            {"cid": company_id}
+        )
+
+        # Delete related records
+        db.query(models.Alert).filter(models.Alert.company_id == company_id).delete()
+        db.query(models.CrawlerLog).filter(models.CrawlerLog.company_id == company_id).delete()
+        db.query(models.SocialMediaPost).filter(models.SocialMediaPost.company_id == company_id).delete()
+        db.query(models.CompanySocial).filter(models.CompanySocial.company_id == company_id).delete()
+        db.execute(text("DELETE FROM user_company_monitoring WHERE company_id = :cid"), {"cid": company_id})
+
+        # Delete company
+        db.delete(company)
+        db.commit()
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete company: {str(e)}")
+
     return None
+
 
 
 # Search companies by name or industry (advanced search)

@@ -17,8 +17,8 @@ from collections import deque
 from urllib.parse import urlparse, urljoin, urlunparse, parse_qsl
 
 from dotenv import load_dotenv
-load_dotenv()
-
+# load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 import requests
 from bs4 import BeautifulSoup
 import urllib.robotparser as robotparser

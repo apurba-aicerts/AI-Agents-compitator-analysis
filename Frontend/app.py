@@ -3,7 +3,8 @@ import requests
 from datetime import datetime
 import os
 from dotenv import load_dotenv
-load_dotenv()
+# load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 API_URL = os.getenv("API_URL") #"http://127.0.0.1:8000"  # FastAPI URL
 

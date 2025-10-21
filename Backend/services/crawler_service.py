@@ -26,8 +26,8 @@ from services.web_crawler import (
     get_page_info, SITEMAP_URLS
 )
 
-load_dotenv()
-
+# load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 

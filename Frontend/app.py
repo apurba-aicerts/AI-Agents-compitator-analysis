@@ -4,8 +4,9 @@ from datetime import datetime
 import os
 from dotenv import load_dotenv
 load_dotenv()
+
 API_URL = os.getenv("API_URL") #"http://127.0.0.1:8000"  # FastAPI URL
-# API_URL = "http://10.20.0.6:8090"
+
 # --------------------
 # Page Configuration
 # --------------------
@@ -273,6 +274,12 @@ if "alerts" not in st.session_state:
     st.session_state.alerts = []
 if "last_fetch" not in st.session_state:
     st.session_state.last_fetch = None
+if "show_add_form" not in st.session_state:
+    st.session_state.show_add_form = False
+if "show_delete_form" not in st.session_state:
+    st.session_state.show_delete_form = False
+if "companies_list" not in st.session_state:
+    st.session_state.companies_list = []
 
 # --------------------
 # Helper Functions
@@ -305,6 +312,47 @@ def run_scroll():
     except Exception as e:
         st.error(f"Error: {str(e)}")
 
+def fetch_companies_list():
+    try:
+        res = requests.get(f"{API_URL}/api/companies/", timeout=10)
+        if res.status_code == 200:
+            st.session_state.companies_list = res.json()
+        else:
+            st.error(f"Failed to load companies (Status: {res.status_code})")
+    except Exception as e:
+        st.error(f"Error fetching companies: {str(e)}")
+
+def add_company(company_data):
+    try:
+        res = requests.post(f"{API_URL}/api/companies/", json=company_data, timeout=10)
+        if res.status_code == 201:
+            st.success(f"✓ Company '{company_data['company_name']}' added successfully!")
+            st.session_state.show_add_form = False
+            return True
+        else:
+            error_detail = res.json().get('detail', 'Unknown error')
+            st.error(f"Failed to add company: {error_detail}")
+            return False
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        return False
+
+def delete_company(company_id, company_name):
+    try:
+        res = requests.delete(f"{API_URL}/api/companies/{company_id}", timeout=10)
+        if res.status_code == 204:
+            st.success(f"✓ Company '{company_name}' deleted successfully!")
+            st.session_state.show_delete_form = False
+            fetch_companies_list()
+            return True
+        else:
+            error_detail = res.json().get('detail', 'Unknown error')
+            st.error(f"Failed to delete company: {error_detail}")
+            return False
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
+        return False
+
 # --------------------
 # Main Dashboard
 # --------------------
@@ -318,25 +366,137 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Action Bar
-col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 3, 1])
+col1, col2, col3, col4, col5, col6, col7 = st.columns([2, 2, 2, 2, 2, 3, 1])
 
 with col1:
     if st.button("🔄 Refresh Alerts", use_container_width=True):
         fetch_alerts()
 
 with col2:
-    if st.button("📊 Fetch Now", use_container_width=True):
+    if st.button("📊 Run Process", use_container_width=True):
         run_scroll()
 
 with col3:
-    if st.button("🗑️ Clear", use_container_width=True):
+    if st.button("➕ Add Company", use_container_width=True):
+        st.session_state.show_add_form = not st.session_state.show_add_form
+        st.session_state.show_delete_form = False
+
+with col4:
+    if st.button("🗑️ Delete Company", use_container_width=True):
+        fetch_companies_list()
+        st.session_state.show_delete_form = not st.session_state.show_delete_form
+        st.session_state.show_add_form = False
+
+with col5:
+    if st.button("🧹 Clear", use_container_width=True):
         st.session_state.alerts = []
         st.session_state.last_fetch = None
         st.info("Dashboard cleared")
 
-with col5:
+with col7:
     if st.session_state.last_fetch:
         st.caption(f"Updated: {st.session_state.last_fetch.strftime('%I:%M %p')}")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# Add Company Form
+if st.session_state.show_add_form:
+    with st.expander("➕ Add New Company", expanded=True):
+        with st.form("add_company_form", clear_on_submit=True):
+            st.markdown("### Company Information")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                company_name = st.text_input("Company Name *", placeholder="e.g., Acme Corporation")
+                industry = st.text_input("Industry", placeholder="e.g., Technology, Finance")
+                headquarters = st.text_input("Headquarters", placeholder="e.g., San Francisco, CA")
+            
+            with col2:
+                founded_year = st.number_input("Founded Year", min_value=1800, max_value=datetime.now().year, value=2000, step=1)
+                employee_count = st.number_input("Employee Count", min_value=0, value=0, step=1)
+                website = st.text_input("Website", placeholder="e.g., https://example.com")
+            
+            col_submit, col_cancel = st.columns([1, 5])
+            
+            with col_submit:
+                submitted = st.form_submit_button("Add Company", use_container_width=True)
+            
+            with col_cancel:
+                if st.form_submit_button("Cancel", use_container_width=True):
+                    st.session_state.show_add_form = False
+                    st.rerun()
+            
+            if submitted:
+                # Validation
+                if not company_name or company_name.strip() == "":
+                    st.error("Company name is required!")
+                elif website and not (website.startswith("http://") or website.startswith("https://")):
+                    st.error("Website must be a valid URL (starting with http:// or https://)")
+                else:
+                    company_data = {
+                        "company_name": company_name.strip(),
+                        "industry": industry.strip() if industry else None,
+                        "headquarters": headquarters.strip() if headquarters else None,
+                        "founded_year": founded_year if founded_year != 2000 else None,
+                        "employee_count": employee_count if employee_count > 0 else None,
+                        "website": website.strip() if website else None
+                    }
+                    
+                    if add_company(company_data):
+                        st.rerun()
+
+# Delete Company Form
+if st.session_state.show_delete_form:
+    with st.expander("🗑️ Delete Company", expanded=True):
+        if not st.session_state.companies_list:
+            st.warning("No companies found in the database.")
+        else:
+            st.markdown("### Select Company to Delete")
+            st.warning("⚠️ Warning: This action will delete the company and all associated data (posts, alerts, logs). This cannot be undone!")
+            
+            # Create a dropdown with company names
+            company_options = {f"{c['company_name']}": c for c in st.session_state.companies_list}
+            
+            selected_company_str = st.selectbox(
+                "Company",
+                options=list(company_options.keys()),
+                help="Select the company you want to delete"
+            )
+            
+            if selected_company_str:
+                selected_company = company_options[selected_company_str]
+                
+                # Show company details
+                st.markdown("#### Company Details")
+                detail_col1, detail_col2 = st.columns(2)
+                
+                with detail_col1:
+                    st.markdown(f"**Name:** {selected_company.get('company_name', 'N/A')}")
+                    st.markdown(f"**Industry:** {selected_company.get('industry', 'N/A')}")
+                    st.markdown(f"**Headquarters:** {selected_company.get('headquarters', 'N/A')}")
+                
+                with detail_col2:
+                    st.markdown(f"**Founded:** {selected_company.get('founded_year', 'N/A')}")
+                    st.markdown(f"**Employees:** {selected_company.get('employee_count', 'N/A')}")
+                    st.markdown(f"**Website:** {selected_company.get('website', 'N/A')}")
+                
+                st.markdown("---")
+                
+                # Confirmation checkbox
+                confirm = st.checkbox(f"I confirm that I want to delete **{selected_company['company_name']}** and all its data")
+                
+                col_delete, col_cancel = st.columns([1, 5])
+                
+                with col_delete:
+                    if st.button("Delete", type="primary", disabled=not confirm, use_container_width=True):
+                        if delete_company(selected_company['company_id'], selected_company['company_name']):
+                            st.rerun()
+                
+                with col_cancel:
+                    if st.button("Cancel", use_container_width=True):
+                        st.session_state.show_delete_form = False
+                        st.rerun()
 
 st.markdown("<br>", unsafe_allow_html=True)
 

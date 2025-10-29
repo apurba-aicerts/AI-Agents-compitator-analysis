@@ -12,7 +12,7 @@ import re
 import json
 import time
 import hashlib
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from dotenv import load_dotenv
 
 from apify_client import ApifyClient
@@ -21,13 +21,15 @@ from pydantic import BaseModel, Field
 
 from core.database import SessionLocal
 from models import SocialMediaPost, Company, Alert, CrawlerLog, Hashtag
-from schemas import CrawlResponse
+from schemas import CrawlResponse, AlertResult
 from services.web_crawler import (
     fetch_xml, is_sitemap_index, extract_sitemap_urls, 
     extract_urls_from_sitemap, crawl_sitemaps_recursive, 
     get_page_info, SITEMAP_URLS
 )
 
+from services.helpers import is_relevant_url, parse_posted_at, process_hashtags, generate_uid_from_url
+from services.llm_service import analyze_alert, create_alert_if_needed
 # load_dotenv()
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 # ============================================================================
@@ -39,22 +41,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 HASHTAG_REGEX = re.compile(r"#(\w+)")
-
-
-# ============================================================================
-# PYDANTIC MODELS FOR AI RESPONSES
-# ============================================================================
-
-class SentimentResponseModel(BaseModel):
-    label: str = Field(..., description="one of: positive/neutral/negative")
-    score: float = Field(..., ge=0.0, le=1.0, description="normalized confidence score 0..1")
-    explanation: Optional[str] = Field(None, description="brief explanation for the label")
-
-
-class AlertResponseModel(BaseModel):
-    title: str = Field(..., description="Title of the alert in 10 words or less")
-    message: str = Field(..., description="Detailed message of the alert")
-    severity: str = Field(..., description="Severity level of the alert (low|medium|high)")
 
 
 # ============================================================================
@@ -71,169 +57,17 @@ def get_db():
 
 
 # ============================================================================
-# DATE PARSING UTILITIES
-# ============================================================================
-
-def parse_posted_at(raw_time: Optional[str]) -> datetime:
-    """Parse various date string formats and return a timezone-aware datetime."""
-    if not raw_time:
-        return datetime.now(timezone.utc)
-    
-    s = str(raw_time).strip()
-    
-    # Try ISO format parsing
-    try:
-        s_cleaned = s.replace("Z", "+00:00")
-        if "." in s_cleaned:
-            parts = s_cleaned.split(".")
-            microseconds = parts[1].split("+")[0]
-            if len(microseconds) > 6:
-                s_cleaned = f"{parts[0]}.{microseconds[:6]}+{parts[1].split('+')[1]}"
-        dt = datetime.fromisoformat(s_cleaned)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except (ValueError, TypeError, IndexError):
-        pass
-    
-    # Try relative time format (e.g., "2 days ago")
-    rel_match = re.search(r"(\d+)\s*(d|day|days|h|hour|hours|m|minute|minutes)\b", s, flags=re.I)
-    if rel_match:
-        qty = int(rel_match.group(1))
-        unit = rel_match.group(2).lower()
-        now = datetime.now(timezone.utc)
-        
-        if unit.startswith("d"):
-            return now - timedelta(days=qty)
-        if unit.startswith("h"):
-            return now - timedelta(hours=qty)
-        return now - timedelta(minutes=qty)
-    
-    logger.warning(f"Could not parse date string: '{s}'. Defaulting to now().")
-    return datetime.now(timezone.utc)
-
-
-# ============================================================================
-# AI ANALYSIS FUNCTIONS
-# ============================================================================
-
-def analyze_post_sentiment(openai_client: OpenAI, post_text: str) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Analyze the sentiment of a post using OpenAI API."""
-    try:
-        prompt = (
-            "Analyze the sentiment of the following LinkedIn post. "
-            "Respond ONLY with a valid JSON object containing: label (positive/neutral/negative), "
-            "score (0..1), and a brief explanation.\n\n"
-            f"Post: \"{post_text}\""
-        )
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=150,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
-        
-        content = response.choices[0].message.content
-        result = json.loads(content)
-        return result, None
-    
-    except Exception as e:
-        return (
-            {"label": "neutral", "score": 0.5, "explanation": "AI analysis failed."},
-            str(e),
-        )
-
-
-def analyze_post_alert(openai_client: OpenAI, post_text: str) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Analyze a post for potential competitive alerts using OpenAI API."""
-    try:
-        prompt = (
-            "You are an expert in competitive intelligence. "
-            "Given the following LinkedIn post, determine if it contains important news or updates "
-            "that competitors should be aware of. "
-            "Respond with a JSON object containing: title (10 words or less), "
-            "message (detailed explanation, less than 15 words), and severity (low|medium|high).\n\n"
-            f"Post: \"{post_text}\""
-        )
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
-        
-        content = response.choices[0].message.content
-        result = json.loads(content)
-        return result, None
-    
-    except Exception as json_err:
-        return (
-            {"title": "No Alert", "message": "AI response was not valid JSON.", "severity": "low"},
-            str(json_err),
-        )
-    
-    except Exception as e:
-        return (
-            {"title": "No Alert", "message": "AI analysis failed.", "severity": "low"},
-            str(e),
-        )
-
-
-# ============================================================================
-# POST PROCESSING UTILITIES
-# ============================================================================
-
-def process_hashtags(db: Session, post: SocialMediaPost, post_text: str):
-    """Extract and link hashtags to a post."""
-    if not post_text:
-        return
-    
-    hashtags = HASHTAG_REGEX.findall(post_text)
-    for tag in hashtags:
-        hashtag_obj = db.query(Hashtag).filter(Hashtag.tag == tag.lower()).first()
-        
-        if not hashtag_obj:
-            hashtag_obj = Hashtag(tag=tag.lower())
-            db.add(hashtag_obj)
-            db.commit()
-            db.refresh(hashtag_obj)
-        
-        if hashtag_obj not in post.hashtags:
-            post.hashtags.append(hashtag_obj)
-
-
-def create_alert_if_needed(db: Session, openai_client: OpenAI, company_id: int, 
-                          post_id: int, post_text: str) -> int:
-    """Create an alert if the post content warrants one."""
-    alert_result, _ = analyze_post_alert(openai_client, post_text)
-    
-    if alert_result and alert_result.get("message"):
-        new_alert = Alert(
-            company_id=company_id,
-            post_id=post_id,
-            alert_message=alert_result.get("message"),
-            severity=alert_result.get("severity"),
-        )
-        db.add(new_alert)
-        return 1
-    
-    return 0
-
-
-# ============================================================================
 # LINKEDIN CRAWLING ENDPOINTS
 # ============================================================================
 
 @router.post("/crawl/linkedin/all", response_model=Dict[str, Any])
-def crawl_linkedin_yesterday_all_companies(
-    day: str = Query("yesterday", enum=["yesterday", "today"]),
+def crawl_linkedin_all_companies(
     db: Session = Depends(get_db),
-    max_posts_per_company: int = 5
+    max_posts_per_company: int = 5,
+    start_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD format"),
+    end_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD format"),
 ):
+
     """
     Crawl yesterday's LinkedIn posts for all companies in the database.
     Processes companies sequentially and returns detailed results per company.
@@ -244,13 +78,21 @@ def crawl_linkedin_yesterday_all_companies(
     db.refresh(log)
     log_id = log.log_id
     
-    # Calculate yesterday's date range
-    yesterday = datetime.now(timezone.utc).date() if day == "today" else datetime.now(timezone.utc).date() - timedelta(days=1)
-    yesterday_start = datetime.combine(yesterday, datetime.min.time()).replace(tzinfo=timezone.utc)
-    yesterday_end = datetime.combine(yesterday, datetime.max.time()).replace(tzinfo=timezone.utc)
-    
-    logger.info(f"Crawling LinkedIn posts from yesterday: {yesterday} (UTC)")
-    
+    # Determine the date range
+    if start_date and end_date:
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+    elif start_date:
+        start_date_obj = end_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+    else:
+        # Default: yesterday
+        start_date_obj = end_date_obj = datetime.now(timezone.utc).date() - timedelta(days=1)
+
+    yesterday_start = datetime.combine(start_date_obj, datetime.min.time()).replace(tzinfo=timezone.utc)
+    yesterday_end = datetime.combine(end_date_obj, datetime.max.time()).replace(tzinfo=timezone.utc)
+
+    logger.info(f"Crawling LinkedIn posts from {start_date_obj} to {end_date_obj} (UTC)")
+
     try:
         companies = db.query(Company).all()
         
@@ -320,7 +162,7 @@ def crawl_linkedin_yesterday_all_companies(
         return {
             "message": f"LinkedIn yesterday crawl completed for {companies_processed}/{len(companies)} companies.",
             "log_id": log_id,
-            "date_crawled": yesterday.isoformat(),
+            "date_crawled": datetime.utcnow().isoformat(),
             "total_companies": len(companies),
             "companies_processed": companies_processed,
             "total_posts_scraped": total_posts_scraped,
@@ -370,7 +212,7 @@ def _process_company_yesterday(
             "limit": max_posts * 2,
             "sort": "recent",
         }
-        
+        # apimaestro/linkedin-company-posts
         actor = apify_client.actor("apimaestro/linkedin-company-posts")
         run = actor.call(run_input=actor_run_input)
         scraped_items = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
@@ -418,7 +260,7 @@ def _process_company_yesterday(
             
             # Extract post data
             post_text = item.get("text", "")
-            sentiment_result, _ = analyze_post_sentiment(openai_client, post_text)
+            # sentiment_result, _ = analyze_post_sentiment(openai_client, post_text)
             stats = item.get("stats", {})
             
             # Create post
@@ -431,8 +273,8 @@ def _process_company_yesterday(
                 "likes": stats.get("total_reactions", 0),
                 "comments_count": stats.get("comments", 0),
                 "shares": stats.get("reposts", 0),
-                "sentiment_label": sentiment_result.get("label"),
-                "sentiment_score": sentiment_result.get("score"),
+                "sentiment_label": "positive",#sentiment_result.get("label"),
+                "sentiment_score": 1,#sentiment_result.get("score"),
             }
             
             new_post = SocialMediaPost(**post_data)
@@ -445,7 +287,9 @@ def _process_company_yesterday(
             
             # Create alert if needed
             alerts_saved += create_alert_if_needed(
-                db, openai_client, company.company_id, new_post.id, post_text
+                db, openai_client, company.company_id, new_post.id, 
+                # f"{post_text} \n Engagement: Likes: {stats.get("total_reactions", 0)}, Shares: {stats.get("reposts", 0)}, Comments: {stats.get("comments", 0)}"
+                f"{post_text} \n Engagement: Likes: {stats.get('total_reactions', 0)}, Shares: {stats.get('reposts', 0)}, Comments: {stats.get('comments', 0)}"
             )
         
         db.commit()
@@ -544,7 +388,7 @@ def crawl_linkedin_by_company(
             
             # Extract and analyze post
             post_text = item.get("text", "")
-            sentiment_result, _ = analyze_post_sentiment(openai_client, post_text)
+            # sentiment_result, _ = analyze_post_sentiment(openai_client, post_text)
             stats = item.get("stats", {})
             
             # Create post data
@@ -557,8 +401,8 @@ def crawl_linkedin_by_company(
                 "likes": stats.get("total_reactions", 0),
                 "comments_count": stats.get("comments", 0),
                 "shares": stats.get("reposts", 0),
-                "sentiment_label": sentiment_result.get("label"),
-                "sentiment_score": sentiment_result.get("score"),
+                "sentiment_label": "positive",#sentiment_result.get("label"),
+                "sentiment_score": 1,#sentiment_result.get("score"),
             }
             
             sample.append(post_data)
@@ -572,7 +416,10 @@ def crawl_linkedin_by_company(
             
             # Create alert if needed
             alerts_saved += create_alert_if_needed(
-                db, openai_client, company_id, new_post.id, post_text
+                db, openai_client, company_id, new_post.id,
+                # f"{post_text} \n Engagement: Likes: {stats.get("total_reactions", 0)}, Shares: {stats.get("reposts", 0)}, Comments: {stats.get("comments", 0)}"
+                f"{post_text} \n Engagement: Likes: {stats.get('total_reactions', 0)}, Shares: {stats.get('reposts', 0)}, Comments: {stats.get('comments', 0)}"
+
             )
         
         db.commit()
@@ -610,10 +457,12 @@ def crawl_linkedin_by_company(
 
 @router.post("/scroll_companies", response_model=CrawlResponse)
 def scroll_companies(
-    db: Session = Depends(get_db), 
+    db: Session = Depends(get_db),
     max_posts_per_company: int = 5,
-    day: str = Query("yesterday", enum=["yesterday", "today"])
+    start_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD format"),
+    end_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD format"),
 ):
+
     """
     Scroll through company websites (via sitemaps) and collect posts from yesterday.
     Performs sentiment analysis and stores results.
@@ -631,10 +480,20 @@ def scroll_companies(
             raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
         openai_client = OpenAI(api_key=openai_key)
         
-        # Get yesterday's date
-        yesterday = datetime.now(timezone.utc).date() if day == "today" else datetime.now(timezone.utc).date() - timedelta(days=1)
-        yesterday_str = yesterday.strftime("%Y-%m-%d")
-        logger.info(f"Scrolling for posts from: {yesterday_str}")
+        try:
+            # Parse the date range
+            if start_date and end_date:
+                start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+                end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+            elif start_date:
+                start_date_obj = end_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+            else:
+                # Default: yesterday
+                start_date_obj = end_date_obj = datetime.now(timezone.utc).date() - timedelta(days=1)
+            
+            logger.info(f"Scrolling for posts between: {start_date_obj} and {end_date_obj}")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {str(e)}")
         
         total_posts_scraped = 0
         total_posts_saved = 0
@@ -654,18 +513,25 @@ def scroll_companies(
             
             try:
                 # Crawl sitemap for yesterday's URLs
-                all_urls = _crawl_sitemaps_for_yesterday(sitemap_url, yesterday_str)
-                
+                all_urls = _crawl_sitemaps_for_range(sitemap_url, start_date_obj, end_date_obj)
+
                 if not all_urls:
                     logger.info(f"No posts found for {company_name} from yesterday.")
                     continue
-                
-                logger.info(f"Found {len(all_urls)} posts for {company_name}")
-                total_posts_scraped += len(all_urls)
-                
+
+                # Filter URLs for AI-related courses/certifications
+                filtered_urls = [u for u in all_urls if is_relevant_url(u.get("url", ""))]
+
+                if not filtered_urls:
+                    logger.info(f"No AI course or certification-related posts found for {company_name}.")
+                    continue
+
+                logger.info(f"Found {len(filtered_urls)} relevant posts for {company_name}")
+                total_posts_scraped += len(filtered_urls)
+
                 # Limit posts per company
-                urls_to_process = all_urls[:max_posts_per_company]
-                
+                urls_to_process = filtered_urls[:max_posts_per_company]
+
                 # Process each post
                 for idx, post_item in enumerate(urls_to_process, 1):
                     result = _process_web_post(
@@ -716,45 +582,36 @@ def scroll_companies(
         logger.exception("Web scroll run failed")
         raise HTTPException(status_code=500, detail=f"Web scroll failed: {str(e)}")
 
-
-def _crawl_sitemaps_for_yesterday(sitemap_url: str, yesterday_str: str) -> List[Dict]:
-    """Crawl sitemaps and filter for posts from yesterday only."""
+def _crawl_sitemaps_for_range(sitemap_url: str, start_date: date, end_date: date) -> List[Dict]:
     logger.info(f"Fetching sitemap: {sitemap_url}")
-    
     root = fetch_xml(sitemap_url)
     if root is None:
         return []
-    
+
     all_urls = []
-    
     if is_sitemap_index(root):
-        logger.info("Detected sitemap index")
         sitemap_urls = extract_sitemap_urls(root)
-        logger.info(f"Found {len(sitemap_urls)} child sitemaps")
-        
         for child_url in sitemap_urls:
-            child_urls = crawl_sitemaps_recursive(child_url, depth=0)
-            all_urls.extend(child_urls)
+            all_urls.extend(crawl_sitemaps_recursive(child_url, depth=0))
             time.sleep(0.3)
     else:
-        logger.info("Processing regular sitemap")
         all_urls = extract_urls_from_sitemap(root)
-    
-    # Filter for yesterday's date
-    yesterday_posts = []
+
+    # Filter for the date range
+    filtered_posts = []
     for url_item in all_urls:
-        if isinstance(url_item, dict):
-            lastmod = url_item.get("lastmod")
-        else:
-            lastmod = None
-        
+        lastmod = url_item.get("lastmod")
         if lastmod:
-            lastmod_date = str(lastmod).split("T")[0]
-            if lastmod_date == yesterday_str:
-                yesterday_posts.append(url_item)
-    
-    logger.info(f"Filtered {len(yesterday_posts)} posts from yesterday ({yesterday_str})")
-    return yesterday_posts
+            lastmod_date = datetime.strptime(str(lastmod).split("T")[0], "%Y-%m-%d").date()
+            # print("-------------------------------------------------------------------")
+            # print(f"{start_date} <= {lastmod_date} <= {end_date}")
+            # print(url_item)
+            # print("-------------------------------------------------------------------")
+            if start_date <= lastmod_date <= end_date:
+                filtered_posts.append(url_item)
+
+    logger.info(f"Found {len(filtered_posts)} posts between {start_date} and {end_date}")
+    return filtered_posts
 
 
 def _process_web_post(
@@ -802,9 +659,9 @@ def _process_web_post(
             return result
         
         # Perform analyses
-        sentiment_result, sentiment_error = analyze_post_sentiment(openai_client, web_text)
-        if sentiment_error:
-            logger.warning(f"Sentiment analysis error: {sentiment_error}")
+        # sentiment_result, sentiment_error = analyze_post_sentiment(openai_client, web_text)
+        # if sentiment_error:
+        #     logger.warning(f"Sentiment analysis error: {sentiment_error}")
         
         # Parse posted_at date
         posted_at = parse_posted_at(lastmod)
@@ -819,8 +676,8 @@ def _process_web_post(
             "likes": 0,
             "comments_count": 0,
             "shares": 0,
-            "sentiment_label": sentiment_result.get("label"),
-            "sentiment_score": sentiment_result.get("score"),
+            "sentiment_label": "positive",#sentiment_result.get("label"),
+            "sentiment_score": 1,#sentiment_result.get("score"),
         }
         
         # Save to database
@@ -830,7 +687,7 @@ def _process_web_post(
         
         logger.info(
             f"[{idx}/{total}] Saved: {title[:60]}... "
-            f"(Sentiment: {sentiment_result.get('label')})"
+            # f"(Sentiment: {sentiment_result.get('label')})"
         )
         
         # Create alert if needed
@@ -846,3 +703,102 @@ def _process_web_post(
         logger.error(f"Error processing post: {e}")
     
     return result
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from core.database import SessionLocal
+import models, schemas
+from services.competitor_analyzer import crawl_website, analyze_with_openai
+
+# router = APIRouter(prefix="/dashboard/competitor", tags=["competitor"])
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@router.post("/firecrawl-analyze", response_model=list[schemas.CompetitorAnalysisOut])
+def analyze_competitors(db: Session = Depends(get_db)):
+    """
+    Crawl all company websites, analyze them via OpenAI, and store insights.
+    """
+    companies = db.query(models.Company).all()
+    if not companies:
+        raise HTTPException(status_code=404, detail="No companies found.")
+
+    results = []
+    for company in companies:
+        if not company.website:
+            continue
+
+        try:
+            raw_data = crawl_website(company.website)
+            if not raw_data:
+                continue
+
+            insights = analyze_with_openai(raw_data)
+
+            analysis = models.CompetitorAnalysis(
+                company_id=company.company_id,
+                company_name=company.company_name,
+                website_url=company.website,
+                raw_data=json.dumps(raw_data, indent=2),
+                analysis_json=json.dumps(insights, indent=2),
+            )
+            db.add(analysis)
+            db.commit()
+            db.refresh(analysis)
+            results.append(analysis)
+            # return results
+        except Exception as e:
+            print(f"Error analyzing {company.company_name}: {e}")
+
+    return results
+
+from sqlalchemy import func, and_
+from sqlalchemy.orm import aliased
+
+@router.get("/firecrawl-insights", response_model=list[schemas.CompetitorAnalysisOut])
+def get_latest_competitor_data(db: Session = Depends(get_db)):
+    """
+    Fetch only the latest competitor analysis per company.
+    """
+
+    # Subquery: find max(created_at) per company
+    subquery = (
+        db.query(
+            models.CompetitorAnalysis.company_name,
+            func.max(models.CompetitorAnalysis.created_at).label("latest_created_at")
+        )
+        .group_by(models.CompetitorAnalysis.company_name)
+        .subquery()
+    )
+
+    # Join with main table to get full latest rows
+    latest_entries = (
+        db.query(models.CompetitorAnalysis)
+        .join(
+            subquery,
+            and_(
+                models.CompetitorAnalysis.company_name == subquery.c.company_name,
+                models.CompetitorAnalysis.created_at == subquery.c.latest_created_at
+            )
+        )
+        .order_by(models.CompetitorAnalysis.company_name.asc())
+        .all()
+    )
+
+    return latest_entries
+# def get_competitor_data(db: Session = Depends(get_db)):
+#     """
+#     Fetch all stored competitor analyses.
+#     """
+#     return (
+#         db.query(models.CompetitorAnalysis)
+#         .order_by(models.CompetitorAnalysis.created_at.desc())
+#         .all()
+#     )
+

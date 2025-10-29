@@ -13,11 +13,12 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 from apify_client import ApifyClient
 from openai import OpenAI
 from sqlalchemy.orm import Session
-
+from schemas import AlertResult
 from core.database import SessionLocal
 from models import SocialMediaPost, Company, Alert, CrawlerLog, Hashtag
 from services.web_crawler import (
@@ -25,15 +26,19 @@ from services.web_crawler import (
     extract_urls_from_sitemap, crawl_sitemaps_recursive,
     get_page_info, SITEMAP_URLS
 )
+from services.helpers import is_relevant_url, parse_posted_at, process_hashtags, generate_uid_from_url
+from services.llm_service import analyze_alert, create_alert_if_needed
 
 # load_dotenv()
+dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env')
+print(f"Loading environment variables from: {dotenv_path}")
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 HASHTAG_REGEX = re.compile(r"#(\w+)")
 
-
+logger.info(f"Loading environment variables from: {dotenv_path}")
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
@@ -97,67 +102,6 @@ def _parse_posted_at(raw_time: Optional[str]) -> datetime:
     logger.warning(f"Could not parse date string: '{s}'. Defaulting to now().")
     return datetime.now(timezone.utc)
 
-
-def _analyze_post_sentiment(openai_client: OpenAI, post_text: str) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Analyze the sentiment of a post using OpenAI API."""
-    try:
-        prompt = (
-            "Analyze the sentiment of the following LinkedIn post. "
-            "Respond ONLY with a valid JSON object containing: label (positive/neutral/negative), "
-            "score (0..1), and a brief explanation.\n\n"
-            f"Post: \"{post_text}\""
-        )
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=150,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
-        
-        content = response.choices[0].message.content
-        result = json.loads(content)
-        return result, None
-    
-    except Exception as e:
-        return (
-            {"label": "neutral", "score": 0.5, "explanation": "AI analysis failed."},
-            str(e),
-        )
-
-
-def _analyze_post_alert(openai_client: OpenAI, post_text: str) -> Tuple[Dict[str, Any], Optional[str]]:
-    """Analyze a post for potential competitive alerts using OpenAI API."""
-    try:
-        prompt = (
-            "You are an expert in competitive intelligence. "
-            "Given the following LinkedIn post, determine if it contains important news or updates "
-            "that competitors should be aware of. "
-            "Respond with a JSON object containing: title (10 words or less), "
-            "message (detailed explanation, less than 15 words), and severity (low|medium|high).\n\n"
-            f"Post: \"{post_text}\""
-        )
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
-        
-        content = response.choices[0].message.content
-        result = json.loads(content)
-        return result, None
-    
-    except Exception as e:
-        return (
-            {"title": "No Alert", "message": "AI analysis failed.", "severity": "low"},
-            str(e),
-        )
-
-
 def _process_hashtags(db: Session, post: SocialMediaPost, post_text: str):
     """Extract and link hashtags to a post."""
     if not post_text:
@@ -175,25 +119,6 @@ def _process_hashtags(db: Session, post: SocialMediaPost, post_text: str):
         
         if hashtag_obj not in post.hashtags:
             post.hashtags.append(hashtag_obj)
-
-
-def _create_alert_if_needed(db: Session, openai_client: OpenAI, company_id: int,
-                            post_id: int, post_text: str) -> int:
-    """Create an alert if the post content warrants one."""
-    alert_result, _ = _analyze_post_alert(openai_client, post_text)
-    
-    if alert_result and alert_result.get("message"):
-        new_alert = Alert(
-            company_id=company_id,
-            post_id=post_id,
-            alert_message=alert_result.get("message"),
-            severity=alert_result.get("severity"),
-        )
-        db.add(new_alert)
-        return 1
-    
-    return 0
-
 
 # ============================================================================
 # MAIN SERVICE FUNCTIONS
@@ -315,7 +240,6 @@ def crawl_linkedin_all(day: str = "yesterday") -> Dict[str, Any]:
     finally:
         db.close()
 
-
 def scroll_companies(day: str = "yesterday", max_posts_per_company: int = 25) -> Dict[str, Any]:
     """
     Scroll through company websites (via sitemaps) and collect posts from target date.
@@ -373,16 +297,32 @@ def scroll_companies(day: str = "yesterday", max_posts_per_company: int = 25) ->
                 # Crawl sitemap for target date URLs
                 all_urls = _crawl_sitemaps_for_date(sitemap_url, target_date_str)
                 
+                # if not all_urls:
+                #     logger.info(f"No posts found for {company_name} from {target_date_str}.")
+                #     continue
+                
+                # logger.info(f"Found {len(all_urls)} posts for {company_name}")
+                # total_posts_scraped += len(all_urls)
+                
+                # # Limit posts per company
+                # urls_to_process = all_urls[:max_posts_per_company]
                 if not all_urls:
-                    logger.info(f"No posts found for {company_name} from {target_date_str}.")
+                    logger.info(f"No posts found for {company_name} from yesterday.")
                     continue
-                
-                logger.info(f"Found {len(all_urls)} posts for {company_name}")
-                total_posts_scraped += len(all_urls)
-                
+
+                # Filter URLs for AI-related courses/certifications
+                filtered_urls = [u for u in all_urls if is_relevant_url(u.get("url", ""))]
+
+                if not filtered_urls:
+                    logger.info(f"No AI course or certification-related posts found for {company_name}.")
+                    continue
+
+                logger.info(f"Found {len(filtered_urls)} relevant posts for {company_name}")
+                total_posts_scraped += len(filtered_urls)
+
                 # Limit posts per company
-                urls_to_process = all_urls[:max_posts_per_company]
-                
+                urls_to_process = filtered_urls[:max_posts_per_company]
+
                 # Process each post
                 for idx, post_item in enumerate(urls_to_process, 1):
                     result = _process_web_post(
@@ -521,7 +461,7 @@ def _process_company_linkedin(
             
             # Extract post data
             post_text = item.get("text", "")
-            sentiment_result, _ = _analyze_post_sentiment(openai_client, post_text)
+            # sentiment_result, _ = _analyze_post_sentiment(openai_client, post_text)
             stats = item.get("stats", {})
             
             # Create post
@@ -534,8 +474,8 @@ def _process_company_linkedin(
                 "likes": stats.get("total_reactions", 0),
                 "comments_count": stats.get("comments", 0),
                 "shares": stats.get("reposts", 0),
-                "sentiment_label": sentiment_result.get("label"),
-                "sentiment_score": sentiment_result.get("score"),
+                "sentiment_label": "positive",#sentiment_result.get("label"),
+                "sentiment_score": 1,#sentiment_result.get("score"),
             }
             
             new_post = SocialMediaPost(**post_data)
@@ -547,8 +487,9 @@ def _process_company_linkedin(
             _process_hashtags(db, new_post, post_text)
             
             # Create alert if needed
-            alerts_saved += _create_alert_if_needed(
-                db, openai_client, company.company_id, new_post.id, post_text
+            alerts_saved += create_alert_if_needed(
+                db, openai_client, company.company_id, new_post.id,
+                f"{post_text} \n Engagement: Likes: {stats.get("total_reactions", 0)}, Shares: {stats.get("reposts", 0)}, Comments: {stats.get("comments", 0)}"
             )
         
         db.commit()
@@ -657,9 +598,9 @@ def _process_web_post(
             return result
         
         # Perform sentiment analysis
-        sentiment_result, sentiment_error = _analyze_post_sentiment(openai_client, web_text)
-        if sentiment_error:
-            logger.warning(f"Sentiment analysis error: {sentiment_error}")
+        # sentiment_result, sentiment_error = _analyze_post_sentiment(openai_client, web_text)
+        # if sentiment_error:
+        #     logger.warning(f"Sentiment analysis error: {sentiment_error}")
         
         # Parse posted_at date
         posted_at = _parse_posted_at(lastmod)
@@ -674,8 +615,8 @@ def _process_web_post(
             "likes": 0,
             "comments_count": 0,
             "shares": 0,
-            "sentiment_label": sentiment_result.get("label"),
-            "sentiment_score": sentiment_result.get("score"),
+            "sentiment_label": "positive",#sentiment_result.get("label"),
+            "sentiment_score": 1,#sentiment_result.get("score"),
         }
         
         # Save to database
@@ -685,11 +626,11 @@ def _process_web_post(
         
         logger.info(
             f"[{idx}/{total}] Saved: {title[:60]}... "
-            f"(Sentiment: {sentiment_result.get('label')})"
+            # f"(Sentiment: {sentiment_result.get('label')})"
         )
         
         # Create alert if needed
-        alerts_created = _create_alert_if_needed(
+        alerts_created = create_alert_if_needed(
             db, openai_client, company_id, new_post.id, web_text
         )
         

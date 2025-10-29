@@ -26,7 +26,7 @@ from apify_client import ApifyClient
 
 # Initialize the ApifyClient with your API token
 client = ApifyClient("apify_api_xzoLbzmGGSTuP6gAsBqvCqcIgSXXoK3RtuV4")
-
+# apify_api_xzoLbzmGGSTuP6gAsBqvCqcIgSXXoK3RtuV4
 # Prepare the Actor input
 run_input = {
     "company_name": "LinkedIn",
@@ -36,7 +36,7 @@ run_input = {
 }
 
 # Run the Actor and wait for it to finish
-run = client.actor("mrThmKLmkxJPehxCg").call(run_input=run_input)
+run = client.actor("apimaestro/linkedin-company-posts").call(run_input=run_input)
 
 # Fetch and print Actor results from the run's dataset (if there are any)
 for item in client.dataset(run["defaultDatasetId"]).iterate_items():

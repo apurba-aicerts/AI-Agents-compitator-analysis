@@ -362,3 +362,146 @@ class CompanyDailyAlerts(BaseModel):
 
     class Config:
         from_attributes = True
+
+class AlertResult(BaseModel):
+    insight: str
+    severity: str  # low, medium, high
+
+
+
+# Add these schemas to your existing schemas.py file
+
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+
+
+# ==================== Reddit Schemas ====================
+
+class RedditPostBase(BaseModel):
+    reddit_id: str
+    title: str
+    selftext: Optional[str] = None
+    author: Optional[str] = None
+    subreddit: str
+    url: Optional[str] = None
+    permalink: Optional[str] = None
+    score: int = 0
+    comments: int = 0
+    upvote_ratio: Optional[float] = None
+    created_utc: datetime
+
+
+class RedditPostCreate(RedditPostBase):
+    author_fullname: Optional[str] = None
+    subreddit_name_prefixed: Optional[str] = None
+    ups: int = 0
+    downs: int = 0
+    is_self: bool = True
+    over_18: bool = False
+    stickied: bool = False
+    is_video: bool = False
+    link_flair_text: Optional[str] = None
+    thumbnail: Optional[str] = None
+    additional_data: Optional[Dict[str, Any]] = None
+
+
+class RedditPostOut(RedditPostBase):
+    id: int
+    fetched_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class RedditClusterMetrics(BaseModel):
+    freshness_score: float
+    engagement_score: float
+    frequency: int
+    total_engagement: float
+
+
+class RedditClusterBase(BaseModel):
+    cluster_name: str
+    summary: str
+    relevance_score: float
+    rank: int
+    metrics: RedditClusterMetrics
+
+
+class RedditClusterCreate(RedditClusterBase):
+    start_date: datetime
+    end_date: datetime
+    keywords: List[str]
+
+
+class RedditClusterOut(RedditClusterBase):
+    id: int
+    start_date: datetime
+    end_date: datetime
+    keywords: List[str]
+    analysis_timestamp: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class RedditClusterWithPosts(RedditClusterOut):
+    posts: List[RedditPostOut] = []
+    
+    class Config:
+        from_attributes = True
+
+
+# Request/Response Schemas
+
+class RedditAnalyzeRequest(BaseModel):
+    start_date: str = Field(..., description="Start date in YYYY-MM-DD format")
+    end_date: str = Field(..., description="End date in YYYY-MM-DD format")
+    keywords: Optional[List[str]] = Field(None, description="Optional keywords to override .env configuration")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "start_date": "2025-10-24",
+                "end_date": "2025-10-25",
+                "keywords": ["certification", "course"]
+            }
+        }
+
+
+class RedditAnalyzeResponse(BaseModel):
+    status: str
+    message: str
+    posts_fetched: int
+    posts_saved: int
+    clusters_created: int
+    date_range: Dict[str, str]
+    keywords: List[str]
+    trending_report: Dict[str, Any]
+
+
+class RedditReportResponse(BaseModel):
+    status: str
+    date_range: Dict[str, str]
+    total_clusters: int
+    total_posts: int
+    clusters: List[RedditClusterWithPosts]
+
+
+
+from pydantic import BaseModel
+from typing import Any
+from datetime import datetime
+
+class CompetitorAnalysisOut(BaseModel):
+    id: int
+    company_id: int
+    company_name: str
+    website_url: str
+    raw_data: Any
+    analysis_json: Any
+    created_at: datetime
+
+    class Config:
+        orm_mode = True

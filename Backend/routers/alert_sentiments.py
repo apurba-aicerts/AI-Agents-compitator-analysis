@@ -180,3 +180,85 @@ def get_sentiment_comparison(
             stats["neutral"] += count
 
     return schemas.SentimentStats(**stats)
+
+@router.get("/alerts/by-date", response_model=List[schemas.CompanyDailyAlerts])
+def get_alerts_by_date_range(
+    db: Session = Depends(get_db),
+    start_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD format"),
+    end_date: Optional[str] = Query(None, description="End date in YYYY-MM-DD format")
+):
+    """
+    Retrieves alerts grouped by company for a specific date or date range (UTC).
+    If only `start_date` is provided, it fetches alerts for that single day.
+    """
+
+    # --- Handle date range ---
+    if not start_date:
+        raise HTTPException(status_code=400, detail="start_date is required")
+
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid start_date format. Use YYYY-MM-DD")
+
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid end_date format. Use YYYY-MM-DD")
+    else:
+        # If only start_date is given, fetch that single day's data
+        end_dt = start_dt + timedelta(days=1)
+
+    # --- Query alerts ---
+    alerts_in_range = (
+        db.query(models.Alert, models.Company, models.SocialMediaPost)
+        .join(models.Company, models.Alert.company_id == models.Company.company_id)
+        .outerjoin(models.SocialMediaPost, models.Alert.post_id == models.SocialMediaPost.id)
+        .filter(models.Alert.created_at >= start_dt)
+        .filter(models.Alert.created_at < end_dt)
+        .order_by(models.Company.company_name, models.Alert.created_at.desc())
+        .all()
+    )
+
+    # --- Group alerts by company ---
+    company_alerts_map = {}
+
+    for alert, company, post in alerts_in_range:
+        company_id = company.company_id
+        if company_id not in company_alerts_map:
+            company_alerts_map[company_id] = {
+                "company_id": company_id,
+                "company_name": company.company_name,
+                "alerts": []
+            }
+
+        post_details = None
+        if post:
+            post_details = schemas.PostDetailsInAlert(
+                post_id=post.id,
+                post_url=post.post_url,
+                post_description=post.post_description,
+                posted_at=post.posted_at,
+                likes=post.likes,
+                comments_count=post.comments_count,
+                shares=post.shares,
+                sentiment_label=post.sentiment_label,
+                sentiment_score=post.sentiment_score
+            )
+
+        company_alerts_map[company_id]["alerts"].append(
+            schemas.AlertWithPost(
+                alert_id=alert.alert_id,
+                alert_message=alert.alert_message,
+                severity=alert.severity,
+                created_at=alert.created_at,
+                post=post_details
+            )
+        )
+
+    # --- Return result ---
+    return [
+        schemas.CompanyDailyAlerts(**company_data)
+        for company_data in company_alerts_map.values()
+    ]

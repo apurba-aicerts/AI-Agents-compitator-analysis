@@ -489,7 +489,7 @@ def _process_company_linkedin(
             # Create alert if needed
             alerts_saved += create_alert_if_needed(
                 db, openai_client, company.company_id, new_post.id,
-                f"{post_text} \n Engagement: Likes: {stats.get("total_reactions", 0)}, Shares: {stats.get("reposts", 0)}, Comments: {stats.get("comments", 0)}"
+                f"{post_text} \n Engagement: Likes: {stats.get('total_reactions', 0)}, Shares: {stats.get('reposts', 0)}, Comments: {stats.get('comments', 0)}"
             )
         
         db.commit()

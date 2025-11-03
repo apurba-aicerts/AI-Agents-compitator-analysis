@@ -837,9 +837,12 @@ if st.session_state.show_intelligence:
                         with cols[j]:
                             # Parse JSON fields
                             raw_data = parse_json_field(company_intel.get('raw_data', '{}'))
+                            # print("--- raw data ---")
+                            # print(raw_data)
                             products = raw_data.get('products', {})
-                            tech_stack = raw_data.get('tech_stack', [])
-                            
+                            tech_stack = raw_data.get('tech_stack', []) or []
+                            # print("----------------------")
+                            # print(tech_stack)
                             # Company card
                             card_html = f"""
                             <div class="company-card">
@@ -907,7 +910,7 @@ if st.session_state.show_intelligence:
         
         # Quick Overview Cards
         products = raw_data.get('products', {})
-        tech_stack = raw_data.get('tech_stack', [])
+        tech_stack = raw_data.get('tech_stack', []) or []
         key_features = raw_data.get('key_features', [])
         
         overview_col1, overview_col2, overview_col3, overview_col4 = st.columns(4)
